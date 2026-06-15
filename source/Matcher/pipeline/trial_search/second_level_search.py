@@ -48,6 +48,8 @@ class SecondStageRetriever:
         if ner_results and ner_results[0]:
             synonyms = set()
             for entity in ner_results[0]:
+                if not isinstance(entity, dict):
+                    continue
                 if entity.get("entity_group", "").lower() == "disease":
                     synonyms.update(entity.get("synonyms", []))
             return list(synonyms)
@@ -400,7 +402,7 @@ class SecondStageRetriever:
                 )
             ranked_criteria = self.score_criteria_without_llm(all_criteria)
 
-        sorted_trials = self.aggregate_to_trials(ranked_criteria)
+        sorted_trials = self.aggregate_to_trials(ranked_criteria, threshold=0.0)
         top_trials = sorted_trials[:top_n]
         logger.info(f"Top {top_n} trials retrieved: {top_trials}")
         if save_path:

@@ -19,7 +19,7 @@ class Normalizer:
     def __init__(
         self, use_neural_normalizer, gene_port=18888, disease_port=18892, no_cuda=False
     ):
-        self.BASE_DIR = "Parser/resources/normalization/"
+        self.BASE_DIR = "source/Parser/resources/normalization/"
         self.NORM_INPUT_DIR = {
             "disease": os.path.join(self.BASE_DIR, "inputs/disease"),
             "gene": os.path.join(self.BASE_DIR, "inputs/gene"),
@@ -185,7 +185,9 @@ class Normalizer:
             oid_cnt = 0
             for saved_item in saved_items:
                 for loc in saved_item["entities"][ent_type]:
-                    loc["id"] = type_oids[oid_cnt]
+                    if oid_cnt < len(type_oids):
+                        loc["id"] = type_oids[oid_cnt]
+                    # else: leave existing id (Java normalizer returned fewer OIDs than entities)
                     loc["is_neural_normalized"] = False
                     oid_cnt += 1
 

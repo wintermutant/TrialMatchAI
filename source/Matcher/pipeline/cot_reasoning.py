@@ -19,7 +19,7 @@ class BatchTrialProcessor:
         device: int,
         batch_size: int = 4,
         use_cot: bool = True,
-        max_new_tokens: int = 5000,  # keep long answers
+        max_new_tokens: int = 2048,
     ):
         """
         Optimized for throughput while preserving long outputs.
@@ -30,7 +30,11 @@ class BatchTrialProcessor:
         - telemetry for tokens/sec and stage timings
         """
         self.device = device
-        self.device_str = f"cuda:{device}"
+        # device may be an int (CUDA index), "mps", or "cpu"
+        if isinstance(device, int):
+            self.device_str = f"cuda:{device}"
+        else:
+            self.device_str = str(device)
         self.batch_size = batch_size
         self.model = model
         self.tokenizer = tokenizer
@@ -199,6 +203,8 @@ class BatchTrialProcessor:
         Expects a list of dicts with keys: nct_id, prompt
         """
         try:
+            ids = [item["nct_id"] for item in batch]
+            logger.info("  → generating: %s", ", ".join(ids))
             t0 = time.time()
             # Tokenize once; pad to the longest in this batch only
             tokenized = self.tokenizer(
@@ -208,23 +214,30 @@ class BatchTrialProcessor:
                 return_tensors="pt",
             )
             input_len = tokenized["input_ids"].shape[1]
+            logger.info("    input_len=%d tokens — starting generate (max_new=%d) ...",
+                        input_len, self.max_new_tokens)
             tokenized = tokenized.to(self.device_str)
             t1 = time.time()
 
             # Autocast to model dtype if it's half/bfloat16 for extra speed
             model_dtype = next(self.model.parameters()).dtype
-            use_autocast = model_dtype in (torch.float16, torch.bfloat16)
+            # MPS doesn't support bfloat16 autocast; CUDA does float16/bfloat16
+            use_autocast = (
+                model_dtype in (torch.float16, torch.bfloat16)
+                and self.device_str.startswith("cuda")
+            )
 
             with torch.inference_mode():
+                import contextlib
                 ctx = (
                     torch.autocast(device_type="cuda", dtype=model_dtype)
                     if use_autocast
-                    else torch.cuda.amp.autocast(enabled=False)
+                    else contextlib.nullcontext()
                 )
                 with ctx:
                     outputs = self.model.generate(
                         **tokenized,
-                        max_new_tokens=self.max_new_tokens,  # long answers kept
+                        max_new_tokens=self.max_new_tokens,
                         do_sample=False,
                         use_cache=True,
                         pad_token_id=self.tokenizer.pad_token_id
@@ -254,10 +267,8 @@ class BatchTrialProcessor:
                 f"out_len≈{gen_len} | tokenize+H2D={t1 - t0:.2f}s | "
                 f"generate={gen_time:.2f}s | ~{(total_gen_tokens / gen_time) if gen_time > 0 else 0:.1f} tok/s"
             )
-        except Exception as e:
-            logger.error(f"Batch processing failed: {str(e)}")
-            for item in batch:
-                logger.error(f"Failed trial: {item['nct_id']}")
+        except Exception:
+            logger.exception("Batch processing failed for: %s", [item["nct_id"] for item in batch])
 
     # ---------------------- Persistence ----------------------
 
@@ -326,10 +337,11 @@ class BatchTrialProcessor:
         # Sort by length (ascending) => minimal padding inside batches
         items.sort(key=lambda x: x["tok_len"])
 
-        # Process in batches
-        for i in tqdm(
-            range(0, len(items), self.batch_size),
-            desc=f"GPU {self.device} Processing Trials",
-        ):
-            batch = items[i : i + self.batch_size]
+        total = len(items)
+        batches = [items[i : i + self.batch_size] for i in range(0, total, self.batch_size)]
+        logger.info("CoT: %d trial(s) to evaluate, batch_size=%d → %d batch(es)",
+                    total, self.batch_size, len(batches))
+        for batch_idx, batch in enumerate(batches, 1):
+            logger.info("  [%d/%d] %s", batch_idx, len(batches),
+                        ", ".join(item["nct_id"] for item in batch))
             self._process_batch(batch, output_folder)
